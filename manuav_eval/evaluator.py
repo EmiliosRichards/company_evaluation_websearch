@@ -4,6 +4,8 @@ import json
 from typing import Any, Dict
 
 from openai import OpenAI
+from openai.types.responses.response_usage import ResponseUsage
+import hashlib
 
 from .rubric_loader import load_rubric_text
 from .schema import json_schema_text_config
@@ -28,7 +30,8 @@ Research process (required):
 - Use the web search tool to:
   - visit/review the company website (home, product, pricing, cases, careers, legal/imprint/contact)
   - search the web for corroborating third-party evidence
-- For each category/section in the rubric, run at least one targeted search query and use the results to support your reasoning.
+- Try to run targeted search queries for each category/section in the rubric and use the results to support your reasoning.
+  - If you have a limited tool-call/search budget, prioritize the rubric’s hard lines and the biggest unknowns first.
 - Prefer primary sources first, then reputable third-party sources. Prioritize DACH-relevant signals.
 - Record every page you relied on in sources_visited (title + URL).
 
@@ -68,7 +71,57 @@ def evaluate_company(
     model: str,
     *,
     rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
 ) -> Dict[str, Any]:
+    result, _usage = _evaluate_company_raw(
+        url,
+        model,
+        rubric_file=rubric_file,
+        max_tool_calls=max_tool_calls,
+        reasoning_effort=reasoning_effort,
+        prompt_cache=prompt_cache,
+        prompt_cache_retention=prompt_cache_retention,
+    )
+    return result
+
+
+def evaluate_company_with_usage(
+    url: str,
+    model: str,
+    *,
+    rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
+) -> tuple[Dict[str, Any], ResponseUsage]:
+    result, usage = _evaluate_company_raw(
+        url,
+        model,
+        rubric_file=rubric_file,
+        max_tool_calls=max_tool_calls,
+        reasoning_effort=reasoning_effort,
+        prompt_cache=prompt_cache,
+        prompt_cache_retention=prompt_cache_retention,
+    )
+    if usage is None:
+        raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
+    return result, usage
+
+
+def _evaluate_company_raw(
+    url: str,
+    model: str,
+    *,
+    rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
+) -> tuple[Dict[str, Any], ResponseUsage | None]:
     client = OpenAI()
     rubric_path, rubric_text = load_rubric_text(rubric_file)
     system_prompt = f"{BASE_SYSTEM_PROMPT}\n\nRubric file: {rubric_path}\n\n{rubric_text}\n"
@@ -77,10 +130,9 @@ def evaluate_company(
     if normalized_url and not normalized_url.lower().startswith(("http://", "https://")):
         normalized_url = f"https://{normalized_url}"
 
+    # Put dynamic content (URL) at the end so more of the prompt prefix can be cached.
     user_prompt = f"""\
-Evaluate this company for Manuav using web research and the Manuav Fit logic:
-
-Company website URL: {normalized_url}
+Evaluate this company for Manuav using web research and the Manuav Fit logic.
 
 Instructions:
 - Use the web search tool to research:
@@ -88,22 +140,37 @@ Instructions:
   - and the broader web for each rubric category (DACH presence, operational status, TAM, competition, innovation, economics, onboarding, pitchability, risk).
 - Be conservative when evidence is missing.
 - In the JSON output:
-  - set input_url exactly to: {normalized_url}
+  - set input_url exactly to the Company website URL below
   - provide a concise reasoning narrative for the score (why it is high/low; mention key rubric drivers and any critical unknowns)
   - provide sources_visited as the list of URLs you relied on (with titles). Include primary sources where possible.
+
+Company website URL: {normalized_url}
 """
 
-    resp = client.responses.create(
-        model=model,
-        input=[
+    create_kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        tools=[{"type": "web_search_preview"}],
-        text=json_schema_text_config(),
-    )
+        "tools": [{"type": "web_search_preview"}],
+        "text": json_schema_text_config(),
+    }
+    if max_tool_calls is not None:
+        create_kwargs["max_tool_calls"] = max_tool_calls
+    if reasoning_effort:
+        create_kwargs["reasoning"] = {"effort": reasoning_effort}
+    # Prompt caching: allows repeated static input (rubric + system instructions) to be billed at cached rate.
+    if prompt_cache:
+        h = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
+        create_kwargs["prompt_cache_key"] = f"manuav:{model}:{h}"
+        if prompt_cache_retention:
+            create_kwargs["prompt_cache_retention"] = prompt_cache_retention
+
+    resp = client.responses.create(**create_kwargs)
 
     text = _extract_json_text(resp)
-    return json.loads(text)
+    result = json.loads(text)
+    return result, resp.usage
 
 

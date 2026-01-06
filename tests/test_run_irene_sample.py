@@ -25,18 +25,34 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
     # Stub the evaluator so no network calls happen.
-    def _fake_evaluate_company(url: str, model: str, *, rubric_file=None):
+    class _Usage:
+        input_tokens = 100
+        output_tokens = 200
+        total_tokens = 300
+        input_tokens_details = type("X", (), {"cached_tokens": 25})()
+        output_tokens_details = type("Y", (), {"reasoning_tokens": 50})()
+
+    def _fake_evaluate_company_with_usage(
+        url: str,
+        model: str,
+        *,
+        rubric_file=None,
+        max_tool_calls=None,
+        reasoning_effort=None,
+        prompt_cache=None,
+        prompt_cache_retention=None,
+    ):
         score = 2.0 if "a.com" in url else 8.0
-        return {
+        return ({
             "input_url": url if url.startswith("http") else f"https://{url}",
             "company_name": "X",
             "manuav_fit_score": score,
             "confidence": "low",
             "reasoning": "r",
             "sources_visited": [{"title": "t", "url": "https://example.com"}],
-        }
+        }, _Usage())
 
-    monkeypatch.setattr(runner, "evaluate_company", _fake_evaluate_company)
+    monkeypatch.setattr(runner, "evaluate_company_with_usage", _fake_evaluate_company_with_usage)
 
     monkeypatch.setattr(
         sys,

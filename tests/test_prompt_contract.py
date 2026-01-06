@@ -24,6 +24,17 @@ def test_system_prompt_requires_search_per_rubric_category(monkeypatch: Any) -> 
                     '{"input_url":"https://example.com","company_name":"X","manuav_fit_score":5,'
                     '"confidence":"low","reasoning":"r","sources_visited":[{"title":"t","url":"u"}]}'
                 )
+                usage = type(
+                    "U",
+                    (),
+                    {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                        "input_tokens_details": type("X", (), {"cached_tokens": 0})(),
+                        "output_tokens_details": type("Y", (), {"reasoning_tokens": 0})(),
+                    },
+                )()
 
             return _R()
 
@@ -38,6 +49,7 @@ def test_system_prompt_requires_search_per_rubric_category(monkeypatch: Any) -> 
     system_msg = fake.responses.kwargs["input"][0]["content"]
 
     assert "web search tool (this is required)" in system_msg
-    assert "For each category/section in the rubric, run at least one targeted search query" in system_msg
+    assert "Try to run targeted search queries for each category/section in the rubric" in system_msg
+    assert "limited tool-call/search budget" in system_msg
 
 

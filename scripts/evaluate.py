@@ -6,6 +6,8 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 from manuav_eval import evaluate_company as core_evaluate_company
+from manuav_eval import evaluate_company_with_usage
+from manuav_eval.costing import compute_cost_usd, pricing_from_env
 from manuav_eval.rubric_loader import DEFAULT_RUBRIC_FILE
 
 
@@ -47,7 +49,34 @@ def main() -> int:
     parser.add_argument(
         "--rubric-file",
         default=os.environ.get("MANUAV_RUBRIC_FILE", str(DEFAULT_RUBRIC_FILE)),
-        help="Path to rubric file (default: env MANUAV_RUBRIC_FILE or rubrics/manuav_rubric_v1.md)",
+        help="Path to rubric file (default: env MANUAV_RUBRIC_FILE or the default rubric)",
+    )
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=int(os.environ["MANUAV_MAX_TOOL_CALLS"]) if os.environ.get("MANUAV_MAX_TOOL_CALLS") else None,
+        help="Optional cap on tool calls (web searches) within the single LLM call. Env: MANUAV_MAX_TOOL_CALLS",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=os.environ.get("MANUAV_REASONING_EFFORT") or None,
+        help="Optional reasoning effort override: none/minimal/low/medium/high/xhigh. Default: auto (unset). Env: MANUAV_REASONING_EFFORT",
+    )
+    parser.add_argument(
+        "--prompt-cache",
+        action="store_true",
+        default=(os.environ.get("MANUAV_PROMPT_CACHE", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
+        help="Enable prompt caching for repeated static input (rubric + system prompt). Env: MANUAV_PROMPT_CACHE=1",
+    )
+    parser.add_argument(
+        "--prompt-cache-retention",
+        default=os.environ.get("MANUAV_PROMPT_CACHE_RETENTION") or None,
+        help="Prompt cache retention: in-memory or 24h. Env: MANUAV_PROMPT_CACHE_RETENTION",
+    )
+    parser.add_argument(
+        "--no-cost",
+        action="store_true",
+        help="Do not print estimated USD cost to stderr (JSON output remains unchanged).",
     )
     args = parser.parse_args()
 
@@ -55,7 +84,23 @@ def main() -> int:
         print("Missing OPENAI_API_KEY env var.", file=sys.stderr)
         return 2
 
-    result = core_evaluate_company(args.url, args.model, rubric_file=args.rubric_file)
+    # By default, print cost to stderr (JSON stays on stdout).
+    result, usage = evaluate_company_with_usage(
+        args.url,
+        args.model,
+        rubric_file=args.rubric_file,
+        max_tool_calls=args.max_tool_calls,
+        reasoning_effort=args.reasoning_effort,
+        prompt_cache=args.prompt_cache,
+        prompt_cache_retention=args.prompt_cache_retention,
+    )
+    if not args.no_cost:
+        pricing = pricing_from_env(os.environ)
+        cost = compute_cost_usd(usage, pricing)
+        print(
+            f"Estimated cost_usd={cost:.6f} (input={usage.input_tokens}, cached={usage.input_tokens_details.cached_tokens}, output={usage.output_tokens})",
+            file=sys.stderr,
+        )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 

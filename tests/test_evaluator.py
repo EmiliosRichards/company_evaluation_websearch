@@ -26,6 +26,8 @@ class _FakeResponse:
     ) -> None:
         self.output_text = output_text
         self.output = output or []
+        # Only needed if evaluate_company_with_usage is used; keep present for safety.
+        self.usage = None
 
 
 class _FakeResponses:
@@ -82,7 +84,7 @@ def test_evaluate_company_builds_prompt_and_normalizes_url(monkeypatch: Any) -> 
     }
     fake_client.responses.response_to_return = _FakeResponse(output_text=json.dumps(payload))
 
-    result = evaluator.evaluate_company("example.com", "gpt-test")
+    result = evaluator.evaluate_company("example.com", "gpt-test", prompt_cache=True, prompt_cache_retention="24h")
     assert result["input_url"] == "https://example.com"
 
     # Verify the request structure.
@@ -90,13 +92,15 @@ def test_evaluate_company_builds_prompt_and_normalizes_url(monkeypatch: Any) -> 
     kwargs = fake_client.responses.last_kwargs
     assert kwargs["model"] == "gpt-test"
     assert kwargs["tools"] == [{"type": "web_search_preview"}]
+    assert "prompt_cache_key" in kwargs
+    assert kwargs.get("prompt_cache_retention") == "24h"
 
     # System prompt includes rubric reference and body.
     system_msg = kwargs["input"][0]["content"]
     assert "Rubric file: rubrics/test.md" in system_msg
     assert "RUBRIC_BODY" in system_msg
 
-    # User prompt includes normalized URL.
+    # User prompt includes normalized URL (placed at the end).
     user_msg = kwargs["input"][1]["content"]
     assert "Company website URL: https://example.com" in user_msg
 

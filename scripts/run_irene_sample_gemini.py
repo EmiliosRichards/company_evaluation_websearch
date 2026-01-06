@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from dotenv import load_dotenv
-from manuav_eval import evaluate_company_with_usage
-from manuav_eval.costing import compute_cost_usd, pricing_from_env
+
+from manuav_eval.costing import compute_gemini_cost_usd, gemini_pricing_from_env
+from manuav_eval.gemini_evaluator import evaluate_company_gemini
 from manuav_eval.rubric_loader import DEFAULT_RUBRIC_FILE
 
 
@@ -30,7 +31,6 @@ def _mae(pairs: List[Tuple[float, float]]) -> float:
 
 
 def _run_stamp() -> str:
-    # Filesystem-friendly local timestamp.
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
@@ -38,7 +38,6 @@ def _suffix_slug(s: str) -> str:
     s = (s or "").strip()
     if not s:
         return ""
-    # Keep it filename-friendly.
     safe = []
     for ch in s:
         if ch.isalnum() or ch in ("-", "_"):
@@ -56,53 +55,22 @@ def main() -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Run the one-call evaluator on Irene's 9-row sample and compare scores.")
+    parser = argparse.ArgumentParser(description="Run the Gemini evaluator on Irene's 9-row sample and compare scores.")
     parser.add_argument("--sample", default="data/irene_sample_9.csv", help="Path to sample CSV created by make_irene_sample.py")
     parser.add_argument("--out", default=None, help="Where to write JSONL results (default: outputs/<timestamp>[_suffix].jsonl)")
-    parser.add_argument(
-        "--out-csv",
-        default=None,
-        help="Where to write CSV results (default: outputs/<timestamp>[_suffix].csv)",
-    )
-    parser.add_argument(
-        "-s",
-        "--suffix",
-        default="",
-        help="Optional suffix added to output filenames (default: none). Example: -s baseline",
-    )
-    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"), help="OpenAI model")
+    parser.add_argument("--out-csv", default=None, help="Where to write CSV results (default: outputs/<timestamp>[_suffix].csv)")
+    parser.add_argument("-s", "--suffix", default="", help="Optional suffix added to output filenames (default: none). Example: -s gemini")
+    parser.add_argument("--model", default=os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"), help="Gemini model")
     parser.add_argument(
         "--rubric-file",
         default=os.environ.get("MANUAV_RUBRIC_FILE", str(DEFAULT_RUBRIC_FILE)),
         help="Path to rubric file (default: env MANUAV_RUBRIC_FILE or rubrics/manuav_rubric_v4_en.md)",
     )
-    parser.add_argument(
-        "--max-tool-calls",
-        type=int,
-        default=int(os.environ["MANUAV_MAX_TOOL_CALLS"]) if os.environ.get("MANUAV_MAX_TOOL_CALLS") else None,
-        help="Optional cap on tool calls (web searches) within each single LLM call. Env: MANUAV_MAX_TOOL_CALLS",
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        default=os.environ.get("MANUAV_REASONING_EFFORT") or None,
-        help="Optional reasoning effort override: none/minimal/low/medium/high/xhigh. Default: auto (unset). Env: MANUAV_REASONING_EFFORT",
-    )
-    parser.add_argument(
-        "--prompt-cache",
-        action="store_true",
-        default=(os.environ.get("MANUAV_PROMPT_CACHE", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
-        help="Enable prompt caching for repeated static input (rubric + system prompt). Env: MANUAV_PROMPT_CACHE=1",
-    )
-    parser.add_argument(
-        "--prompt-cache-retention",
-        default=os.environ.get("MANUAV_PROMPT_CACHE_RETENTION") or None,
-        help="Prompt cache retention: in-memory or 24h. Env: MANUAV_PROMPT_CACHE_RETENTION",
-    )
     parser.add_argument("--sleep", type=float, default=0.5, help="Seconds to sleep between calls")
     args = parser.parse_args()
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("Missing OPENAI_API_KEY env var.")
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise SystemExit("Missing GEMINI_API_KEY env var.")
 
     sample_path = Path(args.sample)
     out_dir = Path("outputs")
@@ -121,10 +89,8 @@ def main() -> int:
         for r in reader:
             rows.append(r)
 
-    results: List[Dict[str, Any]] = []
     pairs: List[Tuple[float, float]] = []
-
-    pricing = pricing_from_env(os.environ)
+    pricing = gemini_pricing_from_env(os.environ)
 
     csv_fieldnames = [
         "run_id",
@@ -141,14 +107,12 @@ def main() -> int:
         "rubric_file",
         "model",
         "input_tokens",
-        "cached_input_tokens",
         "output_tokens",
-        "reasoning_tokens",
-        "total_tokens",
+        "search_queries",
         "cost_usd",
         "price_input_per_1m",
-        "price_cached_input_per_1m",
         "price_output_per_1m",
+        "price_search_per_1k",
     ]
 
     with out_path.open("w", encoding="utf-8") as out, out_csv_path.open("w", encoding="utf-8", newline="") as out_csv:
@@ -161,21 +125,19 @@ def main() -> int:
             if not website or irene_score is None:
                 continue
 
-            print(f"[{i}/{len(rows)}] Evaluating: {r.get('Firma','').strip()} | {website}")
-            model_result, usage = evaluate_company_with_usage(
+            print(f"[{i}/{len(rows)}] Evaluating (Gemini): {r.get('Firma','').strip()} | {website}")
+            model_result, usage, search_queries = evaluate_company_gemini(
                 website,
-                args.model,
+                model_name=args.model,
                 rubric_file=args.rubric_file,
-                max_tool_calls=args.max_tool_calls,
-                reasoning_effort=args.reasoning_effort,
-                prompt_cache=args.prompt_cache,
-                prompt_cache_retention=args.prompt_cache_retention,
             )
-            model_score = float(model_result.get("manuav_fit_score", 0.0))
-            cost_usd = compute_cost_usd(usage, pricing)
 
-            cached_tokens = int(getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0)
-            reasoning_tokens = int(getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0)
+            model_score = float(model_result.get("manuav_fit_score", 0.0))
+            pairs.append((irene_score, model_score))
+
+            in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+            out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+            cost_usd = compute_gemini_cost_usd(usage, pricing, search_queries=search_queries)
 
             record = {
                 "bucket": (r.get("bucket") or "").strip(),
@@ -187,23 +149,17 @@ def main() -> int:
                 "reasoning": model_result.get("reasoning"),
                 "sources_visited": model_result.get("sources_visited"),
                 "usage": {
-                    "input_tokens": usage.input_tokens,
-                    "cached_input_tokens": cached_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": usage.total_tokens,
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "search_queries": search_queries,
                 },
                 "cost_usd": round(cost_usd, 6),
                 "raw": model_result,
             }
-            results.append(record)
-            pairs.append((irene_score, model_score))
 
-            # JSONL (full raw)
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
             out.flush()
 
-            # CSV (flattened)
             sources = model_result.get("sources_visited") or []
             writer.writerow(
                 {
@@ -220,15 +176,13 @@ def main() -> int:
                     "sources_visited_json": json.dumps(sources, ensure_ascii=False),
                     "rubric_file": args.rubric_file,
                     "model": args.model,
-                    "input_tokens": usage.input_tokens,
-                    "cached_input_tokens": cached_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": usage.total_tokens,
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "search_queries": search_queries,
                     "cost_usd": round(cost_usd, 6),
-                    "price_input_per_1m": pricing.input_usd,
-                    "price_cached_input_per_1m": pricing.cached_input_usd,
-                    "price_output_per_1m": pricing.output_usd,
+                    "price_input_per_1m": pricing.input_usd_per_1m,
+                    "price_output_per_1m": pricing.output_usd_per_1m,
+                    "price_search_per_1k": pricing.search_usd_per_1k,
                 }
             )
             out_csv.flush()

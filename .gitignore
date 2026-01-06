@@ -1,5 +1,6 @@
 .env
 *.env
+!.env.example
 __pycache__/
 .venv/
 venv/
@@ -7,4 +8,4 @@ venv/
 outputs/*.jsonl
 outputs/*.json
 outputs/*.csv
-
+data/*.csv
