@@ -9,8 +9,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from dotenv import load_dotenv
-from manuav_eval import evaluate_company_with_usage
-from manuav_eval.costing import compute_cost_usd, pricing_from_env
+from manuav_eval import (
+    evaluate_company_with_usage_and_web_search_artifacts,
+    evaluate_company_with_usage_and_web_search_debug,
+)
+from manuav_eval.costing import (
+    compute_cost_usd,
+    compute_web_search_tool_cost_usd,
+    pricing_from_env,
+    web_search_pricing_from_env,
+)
 from manuav_eval.rubric_loader import DEFAULT_RUBRIC_FILE
 
 
@@ -99,6 +107,12 @@ def main() -> int:
         help="Prompt cache retention: in-memory or 24h. Env: MANUAV_PROMPT_CACHE_RETENTION",
     )
     parser.add_argument("--sleep", type=float, default=0.5, help="Seconds to sleep between calls")
+    parser.add_argument(
+        "--debug-web-search",
+        action="store_true",
+        default=(os.environ.get("MANUAV_DEBUG_WEB_SEARCH", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
+        help="Include OpenAI web_search_call debug info in JSONL records. Env: MANUAV_DEBUG_WEB_SEARCH=1",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -125,6 +139,7 @@ def main() -> int:
     pairs: List[Tuple[float, float]] = []
 
     pricing = pricing_from_env(os.environ)
+    tool_pricing = web_search_pricing_from_env(os.environ)
 
     csv_fieldnames = [
         "run_id",
@@ -137,7 +152,7 @@ def main() -> int:
         "input_url",
         "confidence",
         "reasoning",
-        "sources_visited_json",
+        "url_citations_json",
         "rubric_file",
         "model",
         "input_tokens",
@@ -146,9 +161,13 @@ def main() -> int:
         "reasoning_tokens",
         "total_tokens",
         "cost_usd",
+        "token_cost_usd",
+        "web_search_calls",
+        "web_search_tool_cost_usd",
         "price_input_per_1m",
         "price_cached_input_per_1m",
         "price_output_per_1m",
+        "price_web_search_per_1k",
     ]
 
     with out_path.open("w", encoding="utf-8") as out, out_csv_path.open("w", encoding="utf-8", newline="") as out_csv:
@@ -162,17 +181,32 @@ def main() -> int:
                 continue
 
             print(f"[{i}/{len(rows)}] Evaluating: {r.get('Firma','').strip()} | {website}")
-            model_result, usage = evaluate_company_with_usage(
-                website,
-                args.model,
-                rubric_file=args.rubric_file,
-                max_tool_calls=args.max_tool_calls,
-                reasoning_effort=args.reasoning_effort,
-                prompt_cache=args.prompt_cache,
-                prompt_cache_retention=args.prompt_cache_retention,
-            )
+            if args.debug_web_search:
+                model_result, usage, ws_debug = evaluate_company_with_usage_and_web_search_debug(
+                    website,
+                    args.model,
+                    rubric_file=args.rubric_file,
+                    max_tool_calls=args.max_tool_calls,
+                    reasoning_effort=args.reasoning_effort,
+                    prompt_cache=args.prompt_cache,
+                    prompt_cache_retention=args.prompt_cache_retention,
+                )
+                web_search_calls = int(ws_debug.get("completed", 0))
+                url_citations = ws_debug.get("url_citations") or []
+            else:
+                model_result, usage, web_search_calls, url_citations = evaluate_company_with_usage_and_web_search_artifacts(
+                    website,
+                    args.model,
+                    rubric_file=args.rubric_file,
+                    max_tool_calls=args.max_tool_calls,
+                    reasoning_effort=args.reasoning_effort,
+                    prompt_cache=args.prompt_cache,
+                    prompt_cache_retention=args.prompt_cache_retention,
+                )
             model_score = float(model_result.get("manuav_fit_score", 0.0))
-            cost_usd = compute_cost_usd(usage, pricing)
+            token_cost_usd = compute_cost_usd(usage, pricing)
+            web_search_tool_cost_usd = compute_web_search_tool_cost_usd(web_search_calls, tool_pricing)
+            cost_usd = token_cost_usd + web_search_tool_cost_usd
 
             cached_tokens = int(getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0)
             reasoning_tokens = int(getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0)
@@ -185,7 +219,7 @@ def main() -> int:
                 "model_score": model_score,
                 "model_confidence": model_result.get("confidence"),
                 "reasoning": model_result.get("reasoning"),
-                "sources_visited": model_result.get("sources_visited"),
+                "url_citations": url_citations,
                 "usage": {
                     "input_tokens": usage.input_tokens,
                     "cached_input_tokens": cached_tokens,
@@ -194,6 +228,10 @@ def main() -> int:
                     "total_tokens": usage.total_tokens,
                 },
                 "cost_usd": round(cost_usd, 6),
+                "token_cost_usd": round(token_cost_usd, 6),
+                "web_search_calls": int(web_search_calls),
+                "web_search_tool_cost_usd": round(web_search_tool_cost_usd, 6),
+                "web_search_debug": ws_debug if args.debug_web_search else None,
                 "raw": model_result,
             }
             results.append(record)
@@ -204,7 +242,7 @@ def main() -> int:
             out.flush()
 
             # CSV (flattened)
-            sources = model_result.get("sources_visited") or []
+            sources = url_citations or []
             writer.writerow(
                 {
                     "run_id": stem,
@@ -217,7 +255,7 @@ def main() -> int:
                     "input_url": model_result.get("input_url"),
                     "confidence": model_result.get("confidence"),
                     "reasoning": model_result.get("reasoning"),
-                    "sources_visited_json": json.dumps(sources, ensure_ascii=False),
+                    "url_citations_json": json.dumps(sources, ensure_ascii=False),
                     "rubric_file": args.rubric_file,
                     "model": args.model,
                     "input_tokens": usage.input_tokens,
@@ -226,9 +264,13 @@ def main() -> int:
                     "reasoning_tokens": reasoning_tokens,
                     "total_tokens": usage.total_tokens,
                     "cost_usd": round(cost_usd, 6),
+                    "token_cost_usd": round(token_cost_usd, 6),
+                    "web_search_calls": int(web_search_calls),
+                    "web_search_tool_cost_usd": round(web_search_tool_cost_usd, 6),
                     "price_input_per_1m": pricing.input_usd,
                     "price_cached_input_per_1m": pricing.cached_input_usd,
                     "price_output_per_1m": pricing.output_usd,
+                    "price_web_search_per_1k": tool_pricing.per_1k_calls_usd,
                 }
             )
             out_csv.flush()

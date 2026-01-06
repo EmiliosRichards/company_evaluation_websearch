@@ -132,5 +132,6 @@ Files:
 Scripts print strict JSON including:
 - `manuav_fit_score` (0–10)
 - `confidence` (low/medium/high)
-- `reasoning` (why this score, per rubric)
-- `sources_visited` (the pages relied on)
+- `reasoning` (short: why this score, per rubric)
+
+Note: sources/URLs are not included in the JSON output to save output tokens. For OpenAI, you can extract citations from the Responses API output annotations when web search is enabled.

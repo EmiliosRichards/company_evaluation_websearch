@@ -32,7 +32,7 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         input_tokens_details = type("X", (), {"cached_tokens": 25})()
         output_tokens_details = type("Y", (), {"reasoning_tokens": 50})()
 
-    def _fake_evaluate_company_with_usage(
+    def _fake_evaluate_company_with_usage_and_web_search_artifacts(
         url: str,
         model: str,
         *,
@@ -43,16 +43,60 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         prompt_cache_retention=None,
     ):
         score = 2.0 if "a.com" in url else 8.0
-        return ({
-            "input_url": url if url.startswith("http") else f"https://{url}",
-            "company_name": "X",
-            "manuav_fit_score": score,
-            "confidence": "low",
-            "reasoning": "r",
-            "sources_visited": [{"title": "t", "url": "https://example.com"}],
-        }, _Usage())
+        return (
+            {
+                "input_url": url if url.startswith("http") else f"https://{url}",
+                "company_name": "X",
+                "manuav_fit_score": score,
+                "confidence": "low",
+                "reasoning": "r",
+            },
+            _Usage(),
+            3,
+            [{"url": "https://example.com", "title": "t"}],
+        )
 
-    monkeypatch.setattr(runner, "evaluate_company_with_usage", _fake_evaluate_company_with_usage)
+    monkeypatch.setattr(
+        runner,
+        "evaluate_company_with_usage_and_web_search_artifacts",
+        _fake_evaluate_company_with_usage_and_web_search_artifacts,
+    )
+
+    def _fake_evaluate_company_with_usage_and_web_search_debug(
+        url: str,
+        model: str,
+        *,
+        rubric_file=None,
+        max_tool_calls=None,
+        reasoning_effort=None,
+        prompt_cache=None,
+        prompt_cache_retention=None,
+    ):
+        score = 2.0 if "a.com" in url else 8.0
+        return (
+            {
+                "input_url": url if url.startswith("http") else f"https://{url}",
+                "company_name": "X",
+                "manuav_fit_score": score,
+                "confidence": "low",
+                "reasoning": "r",
+            },
+            _Usage(),
+            {
+                "completed": 3,
+                "total": 3,
+                "by_status": {"completed": 3},
+                "calls": [],
+                "output_item_types": [],
+                "url_citations": [{"url": "https://example.com", "title": "t"}],
+            },
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "evaluate_company_with_usage_and_web_search_debug",
+        _fake_evaluate_company_with_usage_and_web_search_debug,
+    )
 
     monkeypatch.setattr(
         sys,
@@ -81,6 +125,6 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
     assert len(lines) == 2
     rec = json.loads(lines[0])
     assert "raw" in rec
-    assert "sources_visited" in rec
+    assert "url_citations" in rec
 
 

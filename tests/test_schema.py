@@ -13,7 +13,6 @@ def test_schema_has_expected_keys_only() -> None:
         "manuav_fit_score",
         "confidence",
         "reasoning",
-        "sources_visited",
     }
     assert set(props.keys()) == expected
     assert required == expected

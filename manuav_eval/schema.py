@@ -11,21 +11,8 @@ OUTPUT_SCHEMA: Dict[str, Any] = {
         "company_name": {"type": "string"},
         "manuav_fit_score": {"type": "number", "minimum": 0, "maximum": 10},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "reasoning": {"type": "string"},
-        "sources_visited": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 30,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "title": {"type": "string"},
-                    "url": {"type": "string"},
-                },
-                "required": ["title", "url"],
-            },
-        },
+        # Keep short to reduce output tokens. If more detail is needed, rely on logs / citations.
+        "reasoning": {"type": "string", "maxLength": 600},
     },
     "required": [
         "input_url",
@@ -33,7 +20,6 @@ OUTPUT_SCHEMA: Dict[str, Any] = {
         "manuav_fit_score",
         "confidence",
         "reasoning",
-        "sources_visited",
     ],
 }
 

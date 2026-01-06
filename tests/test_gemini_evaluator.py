@@ -22,7 +22,6 @@ def test_evaluate_company_gemini(monkeypatch):
         "manuav_fit_score": 7.5,
         "confidence": "high",
         "reasoning": "Good fit.",
-        "sources_visited": [{"title": "Example", "url": "https://example.com"}],
     }
     mock_response.text = json.dumps(fake_result)
     mock_response.usage_metadata = MagicMock()
@@ -70,7 +69,6 @@ def test_evaluate_company_gemini_with_debug(monkeypatch):
         "manuav_fit_score": 7.5,
         "confidence": "high",
         "reasoning": "Good fit.",
-        "sources_visited": [{"title": "Example", "url": "https://example.com"}],
     }
     mock_response.text = json.dumps(fake_result)
     mock_response.usage_metadata = MagicMock()

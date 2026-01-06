@@ -30,7 +30,6 @@ def test_run_irene_sample_gemini_writes_jsonl(tmp_path: Path, monkeypatch) -> No
                 "manuav_fit_score": 2.0,
                 "confidence": "low",
                 "reasoning": "r",
-                "sources_visited": [{"title": "t", "url": "u"}],
             },
             _Usage(),
             3,

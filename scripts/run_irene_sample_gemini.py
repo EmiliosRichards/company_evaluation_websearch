@@ -103,7 +103,7 @@ def main() -> int:
         "input_url",
         "confidence",
         "reasoning",
-        "sources_visited_json",
+        "url_citations_json",
         "rubric_file",
         "model",
         "input_tokens",
@@ -147,7 +147,7 @@ def main() -> int:
                 "model_score": model_score,
                 "model_confidence": model_result.get("confidence"),
                 "reasoning": model_result.get("reasoning"),
-                "sources_visited": model_result.get("sources_visited"),
+                "url_citations": [],
                 "usage": {
                     "input_tokens": in_tok,
                     "output_tokens": out_tok,
@@ -160,7 +160,7 @@ def main() -> int:
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
             out.flush()
 
-            sources = model_result.get("sources_visited") or []
+            sources = []
             writer.writerow(
                 {
                     "run_id": stem,
@@ -173,7 +173,7 @@ def main() -> int:
                     "input_url": model_result.get("input_url"),
                     "confidence": model_result.get("confidence"),
                     "reasoning": model_result.get("reasoning"),
-                    "sources_visited_json": json.dumps(sources, ensure_ascii=False),
+                    "url_citations_json": json.dumps(sources, ensure_ascii=False),
                     "rubric_file": args.rubric_file,
                     "model": args.model,
                     "input_tokens": in_tok,

@@ -14,6 +14,11 @@ class PricingPer1M:
 
 
 @dataclass(frozen=True)
+class WebSearchPricing:
+    per_1k_calls_usd: float = 10.0
+
+
+@dataclass(frozen=True)
 class GeminiPricing:
     input_usd_per_1m: float = 0.50
     output_usd_per_1m: float = 3.00
@@ -32,6 +37,11 @@ def compute_cost_usd(usage: ResponseUsage, pricing: PricingPer1M) -> float:
         + (cached / 1_000_000.0) * pricing.cached_input_usd
         + (output_tokens / 1_000_000.0) * pricing.output_usd
     )
+
+
+def compute_web_search_tool_cost_usd(web_search_calls: int, pricing: WebSearchPricing) -> float:
+    calls = max(0, int(web_search_calls))
+    return calls * (pricing.per_1k_calls_usd / 1000.0)
 
 
 def compute_gemini_cost_usd(usage: Any, pricing: GeminiPricing, *, search_queries: int = 0) -> float:
@@ -71,6 +81,15 @@ def pricing_from_env(env: dict, default: Optional[PricingPer1M] = None) -> Prici
         cached_input_usd=_get_float("MANUAV_PRICE_CACHED_INPUT_PER_1M", base.cached_input_usd),
         output_usd=_get_float("MANUAV_PRICE_OUTPUT_PER_1M", base.output_usd),
     )
+
+
+def web_search_pricing_from_env(env: dict, default: Optional[WebSearchPricing] = None) -> WebSearchPricing:
+    base = default or WebSearchPricing()
+
+    v = env.get("MANUAV_PRICE_WEB_SEARCH_PER_1K")
+    if v is None or str(v).strip() == "":
+        return base
+    return WebSearchPricing(per_1k_calls_usd=float(str(v).strip()))
 
 
 def gemini_pricing_from_env(env: dict) -> GeminiPricing:

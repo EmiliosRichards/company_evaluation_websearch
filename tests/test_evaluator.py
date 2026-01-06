@@ -80,7 +80,6 @@ def test_evaluate_company_builds_prompt_and_normalizes_url(monkeypatch: Any) -> 
         "manuav_fit_score": 5.0,
         "confidence": "low",
         "reasoning": "because",
-        "sources_visited": [{"title": "t", "url": "https://example.com"}],
     }
     fake_client.responses.response_to_return = _FakeResponse(output_text=json.dumps(payload))
 

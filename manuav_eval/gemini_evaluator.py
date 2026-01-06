@@ -158,8 +158,7 @@ Instructions:
 - Be conservative when evidence is missing.
 - In the JSON output:
   - set input_url exactly to the Company website URL below
-  - provide a concise reasoning narrative for the score (why it is high/low; mention key rubric drivers and any critical unknowns)
-  - provide sources_visited as the list of URLs you relied on (with titles). Include primary sources where possible.
+  - keep reasoning SHORT (max ~600 characters, 2-4 sentences). Focus on the top 2-4 drivers and the biggest unknown.
 
 Company website URL: {normalized_url}
 """

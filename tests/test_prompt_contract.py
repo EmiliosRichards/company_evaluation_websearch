@@ -5,8 +5,8 @@ from typing import Any, Optional
 import manuav_eval.evaluator as evaluator
 
 
-def test_system_prompt_requires_search_per_rubric_category(monkeypatch: Any) -> None:
-    # Ensure the prompt keeps the behavioral contract: search tool use per rubric category.
+def test_system_prompt_mentions_search_and_budget_guidance(monkeypatch: Any) -> None:
+    # Ensure the prompt keeps the behavioral contract: search tool use + budget-aware guidance.
     def _fake_load_rubric_text(_: Optional[str]) -> tuple[str, str]:
         return ("rubrics/test.md", "RUBRIC_BODY")
 
@@ -22,7 +22,7 @@ def test_system_prompt_requires_search_per_rubric_category(monkeypatch: Any) -> 
             class _R:
                 output_text = (
                     '{"input_url":"https://example.com","company_name":"X","manuav_fit_score":5,'
-                    '"confidence":"low","reasoning":"r","sources_visited":[{"title":"t","url":"u"}]}'
+                    '"confidence":"low","reasoning":"r"}'
                 )
                 usage = type(
                     "U",
@@ -49,7 +49,7 @@ def test_system_prompt_requires_search_per_rubric_category(monkeypatch: Any) -> 
     system_msg = fake.responses.kwargs["input"][0]["content"]
 
     assert "web search tool (this is required)" in system_msg
-    assert "Try to run targeted search queries for each category/section in the rubric" in system_msg
+    assert "Use the web search tool strategically" in system_msg
     assert "limited tool-call/search budget" in system_msg
 
 

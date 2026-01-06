@@ -30,10 +30,10 @@ Research process (required):
 - Use the web search tool to:
   - visit/review the company website (home, product, pricing, cases, careers, legal/imprint/contact)
   - search the web for corroborating third-party evidence
-- Try to run targeted search queries for each category/section in the rubric and use the results to support your reasoning.
-  - If you have a limited tool-call/search budget, prioritize the rubric’s hard lines and the biggest unknowns first.
+- Use the web search tool strategically.
+  - If you have a limited tool-call/search budget, prioritize validating the rubric’s hard lines and the biggest unknowns first.
 - Prefer primary sources first, then reputable third-party sources. Prioritize DACH-relevant signals.
-- Record every page you relied on in sources_visited (title + URL).
+- You do NOT need to output a sources list in JSON. Keep the output compact.
 
 Entity disambiguation (guideline):
 - Be mindful of same-name/lookalike companies. Use your judgment to sanity-check that a source is actually about the company behind the provided website URL.
@@ -76,7 +76,7 @@ def evaluate_company(
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
 ) -> Dict[str, Any]:
-    result, _usage = _evaluate_company_raw(
+    result, _usage, _web_search_calls = _evaluate_company_raw(
         url,
         model,
         rubric_file=rubric_file,
@@ -98,7 +98,7 @@ def evaluate_company_with_usage(
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage]:
-    result, usage = _evaluate_company_raw(
+    result, usage, _web_search_calls = _evaluate_company_raw(
         url,
         model,
         rubric_file=rubric_file,
@@ -112,6 +112,158 @@ def evaluate_company_with_usage(
     return result, usage
 
 
+def evaluate_company_with_usage_and_web_search_calls(
+    url: str,
+    model: str,
+    *,
+    rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
+) -> tuple[Dict[str, Any], ResponseUsage, int]:
+    result, usage, ws_stats = _evaluate_company_raw(
+        url,
+        model,
+        rubric_file=rubric_file,
+        max_tool_calls=max_tool_calls,
+        reasoning_effort=reasoning_effort,
+        prompt_cache=prompt_cache,
+        prompt_cache_retention=prompt_cache_retention,
+    )
+    if usage is None:
+        raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
+    return result, usage, int(ws_stats.get("completed", 0))
+
+
+def _count_web_search_calls(resp: Any) -> int:
+    """Count how many *completed* web search tool calls happened in the response.
+
+    We count only status='completed' to better approximate billable tool calls.
+    """
+    n = 0
+    for item in getattr(resp, "output", []) or []:
+        t = getattr(item, "type", None)
+        if t == "web_search_call":
+            status = getattr(item, "status", None)
+            if status == "completed":
+                n += 1
+    return n
+
+
+def _web_search_call_debug(resp: Any) -> Dict[str, Any]:
+    """Extract debug info about web search tool usage from a Responses API response."""
+    output = getattr(resp, "output", []) or []
+    output_item_types = [getattr(it, "type", None) for it in output]
+
+    def _extract_url_citations() -> list[dict[str, str]]:
+        citations: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in output:
+            if getattr(item, "type", None) != "message":
+                continue
+            for c in getattr(item, "content", []) or []:
+                anns = getattr(c, "annotations", None) or []
+                for ann in anns:
+                    ann_type = getattr(ann, "type", None)
+                    if ann_type != "url_citation":
+                        continue
+                    uc = getattr(ann, "url_citation", None)
+                    url = getattr(uc, "url", None) if uc is not None else None
+                    title = getattr(uc, "title", None) if uc is not None else None
+                    if isinstance(url, str) and url and url not in seen:
+                        citations.append({"url": url, "title": title or ""})
+                        seen.add(url)
+        return citations
+
+    calls = []
+    by_status: Dict[str, int] = {}
+    total = 0
+    completed = 0
+
+    for it in output:
+        if getattr(it, "type", None) != "web_search_call":
+            continue
+        total += 1
+        status = getattr(it, "status", None) or "unknown"
+        by_status[status] = by_status.get(status, 0) + 1
+        if status == "completed":
+            completed += 1
+        calls.append(
+            {
+                "id": getattr(it, "id", None),
+                "status": status,
+            }
+        )
+
+    return {
+        "output_item_types": output_item_types,
+        "total": total,
+        "completed": completed,
+        "by_status": by_status,
+        "calls": calls,
+        "url_citations": _extract_url_citations(),
+    }
+
+
+def evaluate_company_with_usage_and_web_search_debug(
+    url: str,
+    model: str,
+    *,
+    rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
+) -> tuple[Dict[str, Any], ResponseUsage, Dict[str, Any]]:
+    """Returns model JSON + usage + debug info about web_search_call items."""
+    result, usage, ws_stats = _evaluate_company_raw(
+        url,
+        model,
+        rubric_file=rubric_file,
+        max_tool_calls=max_tool_calls,
+        reasoning_effort=reasoning_effort,
+        prompt_cache=prompt_cache,
+        prompt_cache_retention=prompt_cache_retention,
+    )
+    if usage is None:
+        raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
+    return result, usage, ws_stats
+
+
+def evaluate_company_with_usage_and_web_search_artifacts(
+    url: str,
+    model: str,
+    *,
+    rubric_file: str | None = None,
+    max_tool_calls: int | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache: bool | None = None,
+    prompt_cache_retention: str | None = None,
+) -> tuple[Dict[str, Any], ResponseUsage, int, list[dict[str, str]]]:
+    """
+    Returns:
+    - parsed JSON result (compact, no sources list)
+    - token usage
+    - completed web search tool calls
+    - URL citations extracted from response annotations (when available)
+    """
+    result, usage, ws_stats = _evaluate_company_raw(
+        url,
+        model,
+        rubric_file=rubric_file,
+        max_tool_calls=max_tool_calls,
+        reasoning_effort=reasoning_effort,
+        prompt_cache=prompt_cache,
+        prompt_cache_retention=prompt_cache_retention,
+    )
+    if usage is None:
+        raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
+    web_search_calls = int(ws_stats.get("completed", 0))
+    citations = ws_stats.get("url_citations") or []
+    return result, usage, web_search_calls, citations
+
+
 def _evaluate_company_raw(
     url: str,
     model: str,
@@ -121,7 +273,7 @@ def _evaluate_company_raw(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
-) -> tuple[Dict[str, Any], ResponseUsage | None]:
+) -> tuple[Dict[str, Any], ResponseUsage | None, Dict[str, Any]]:
     client = OpenAI()
     rubric_path, rubric_text = load_rubric_text(rubric_file)
     system_prompt = f"{BASE_SYSTEM_PROMPT}\n\nRubric file: {rubric_path}\n\n{rubric_text}\n"
@@ -131,6 +283,12 @@ def _evaluate_company_raw(
         normalized_url = f"https://{normalized_url}"
 
     # Put dynamic content (URL) at the end so more of the prompt prefix can be cached.
+    tool_budget_line = (
+        f"- Tool-call budget: you can make at most {max_tool_calls} web search tool call(s). Use them wisely.\n"
+        if max_tool_calls is not None
+        else ""
+    )
+
     user_prompt = f"""\
 Evaluate this company for Manuav using web research and the Manuav Fit logic.
 
@@ -138,11 +296,11 @@ Instructions:
 - Use the web search tool to research:
   - the company website itself (product/service, ICP, pricing, cases, careers, legal/imprint)
   - and the broader web for each rubric category (DACH presence, operational status, TAM, competition, innovation, economics, onboarding, pitchability, risk).
-- Be conservative when evidence is missing.
+{tool_budget_line}- Be conservative when evidence is missing.
 - In the JSON output:
   - set input_url exactly to the Company website URL below
-  - provide a concise reasoning narrative for the score (why it is high/low; mention key rubric drivers and any critical unknowns)
-  - provide sources_visited as the list of URLs you relied on (with titles). Include primary sources where possible.
+  - keep reasoning SHORT (max ~600 characters, 2-4 sentences). Focus on the top 2-4 drivers and the biggest unknown.
+  - do NOT include URLs or a sources list in JSON.
 
 Company website URL: {normalized_url}
 """
@@ -171,6 +329,6 @@ Company website URL: {normalized_url}
 
     text = _extract_json_text(resp)
     result = json.loads(text)
-    return result, resp.usage
+    return result, resp.usage, _web_search_call_debug(resp)
 
 
