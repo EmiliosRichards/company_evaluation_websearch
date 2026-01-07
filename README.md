@@ -75,6 +75,18 @@ Optional (reasoning effort override; default is auto - OpenAI only):
 MANUAV_REASONING_EFFORT=low
 ```
 
+Optional (Flex processing - OpenAI only):
+
+- Flex can be **cheaper** (Batch-rate token pricing) but **slower** and may occasionally return `429 Resource Unavailable` (not charged).
+- If you enable Flex, consider increasing timeouts.
+
+```bash
+MANUAV_SERVICE_TIER=flex
+MANUAV_OPENAI_TIMEOUT_SECONDS=900
+MANUAV_FLEX_MAX_RETRIES=5
+MANUAV_FLEX_FALLBACK_TO_AUTO=1
+```
+
 ### Run (OpenAI)
 
 ```bash
@@ -112,13 +124,13 @@ python -m scripts.make_irene_sample
 Run the evaluator on the sample (writes JSONL + prints MAE):
 
 ```bash
-python -m scripts.run_irene_sample
+python -m scripts.evaluate_list
 ```
 
 This also writes a **timestamped CSV** to `outputs/`. Add a suffix with `-s`:
 
 ```bash
-python -m scripts.run_irene_sample -s baseline
+python -m scripts.evaluate_list -s baseline
 ```
 
 Files:
@@ -135,3 +147,32 @@ Scripts print strict JSON including:
 - `reasoning` (short: why this score, per rubric)
 
 Note: sources/URLs are not included in the JSON output to save output tokens. For OpenAI, you can extract citations from the Responses API output annotations when web search is enabled.
+
+### Batch API (OpenAI, async, ~50% cheaper)
+
+You can run Irene samples via the Batch API (asynchronous, completes within 24h):
+
+Important limitation:
+- **Web search tools are not supported in the OpenAI Batch API** right now. If you include `tools` in batch requests, the batch will fail with `web_search_unsupported`.
+- That means Batch is only suitable for runs where you provide all evidence in the prompt (no tool use), or for other non-tool workloads.
+
+1) Create a batch job (writes an input JSONL, uploads it, creates the batch):
+
+```bash
+python -m scripts.run_irene_sample_batch create --sample data/irene_sample_9_seed99.csv --model gpt-5-mini-2025-08-07 --suffix seed99 --no-web-search
+```
+
+2) Check status:
+
+```bash
+python -m scripts.run_irene_sample_batch status <batch_id>
+```
+
+3) Fetch results (downloads output file and writes results CSV/JSONL):
+
+```bash
+python -m scripts.run_irene_sample_batch fetch <batch_id> --suffix seed99
+```
+
+Cost notes:
+- Batch costs are discounted by ~50% vs sync; the fetch step applies a `MANUAV_BATCH_DISCOUNT` multiplier (default 0.5) to estimate total cost.

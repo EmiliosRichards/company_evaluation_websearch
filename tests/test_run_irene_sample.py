@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-import scripts.run_irene_sample as runner
+import scripts.evaluate_list as runner
 
 
 def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None:
@@ -41,6 +41,10 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         reasoning_effort=None,
         prompt_cache=None,
         prompt_cache_retention=None,
+        service_tier=None,
+        timeout_seconds=None,
+        flex_max_retries=None,
+        flex_fallback_to_auto=None,
     ):
         score = 2.0 if "a.com" in url else 8.0
         return (
@@ -71,6 +75,10 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         reasoning_effort=None,
         prompt_cache=None,
         prompt_cache_retention=None,
+        service_tier=None,
+        timeout_seconds=None,
+        flex_max_retries=None,
+        flex_fallback_to_auto=None,
     ):
         score = 2.0 if "a.com" in url else 8.0
         return (
@@ -102,7 +110,7 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         sys,
         "argv",
         [
-            "run_irene_sample.py",
+            "evaluate_list.py",
             "--sample",
             str(sample),
             "--out",

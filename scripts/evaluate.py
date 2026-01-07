@@ -74,6 +74,29 @@ def main() -> int:
         help="Prompt cache retention: in-memory or 24h. Env: MANUAV_PROMPT_CACHE_RETENTION",
     )
     parser.add_argument(
+        "--service-tier",
+        default=os.environ.get("MANUAV_SERVICE_TIER", "auto"),
+        help="OpenAI service tier: auto (default) or flex. Env: MANUAV_SERVICE_TIER",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=float(os.environ["MANUAV_OPENAI_TIMEOUT_SECONDS"]) if os.environ.get("MANUAV_OPENAI_TIMEOUT_SECONDS") else None,
+        help="Request timeout in seconds. For flex, you may want ~900s. Env: MANUAV_OPENAI_TIMEOUT_SECONDS",
+    )
+    parser.add_argument(
+        "--flex-max-retries",
+        type=int,
+        default=int(os.environ.get("MANUAV_FLEX_MAX_RETRIES", "5")),
+        help="Retries (with exponential backoff) on 429 Resource Unavailable when service-tier is flex. Env: MANUAV_FLEX_MAX_RETRIES",
+    )
+    parser.add_argument(
+        "--flex-fallback-to-auto",
+        action="store_true",
+        default=(os.environ.get("MANUAV_FLEX_FALLBACK_TO_AUTO", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
+        help="If flex is unavailable after retries, retry once with standard processing (auto). Env: MANUAV_FLEX_FALLBACK_TO_AUTO=1",
+    )
+    parser.add_argument(
         "--no-cost",
         action="store_true",
         help="Do not print estimated USD cost to stderr (JSON output remains unchanged).",
@@ -90,6 +113,11 @@ def main() -> int:
         print("Missing OPENAI_API_KEY env var.", file=sys.stderr)
         return 2
 
+    # Flex can be slower; default to a larger timeout if not set explicitly.
+    timeout_seconds = args.timeout_seconds
+    if timeout_seconds is None and (args.service_tier or "").strip().lower() == "flex":
+        timeout_seconds = 900.0
+
     # By default, print cost to stderr (JSON stays on stdout).
     if args.debug_web_search:
         result, usage, ws_debug = evaluate_company_with_usage_and_web_search_debug(
@@ -100,6 +128,10 @@ def main() -> int:
             reasoning_effort=args.reasoning_effort,
             prompt_cache=args.prompt_cache,
             prompt_cache_retention=args.prompt_cache_retention,
+            service_tier=args.service_tier,
+            timeout_seconds=timeout_seconds,
+            flex_max_retries=args.flex_max_retries,
+            flex_fallback_to_auto=args.flex_fallback_to_auto,
         )
         web_search_calls = int(ws_debug.get("completed", 0))
         citations = ws_debug.get("url_citations") or []
@@ -114,6 +146,10 @@ def main() -> int:
             reasoning_effort=args.reasoning_effort,
             prompt_cache=args.prompt_cache,
             prompt_cache_retention=args.prompt_cache_retention,
+            service_tier=args.service_tier,
+            timeout_seconds=timeout_seconds,
+            flex_max_retries=args.flex_max_retries,
+            flex_fallback_to_auto=args.flex_fallback_to_auto,
         )
     if not args.no_cost:
         pricing = pricing_from_env(os.environ)
@@ -122,7 +158,7 @@ def main() -> int:
         web_search_cost = compute_web_search_tool_cost_usd(web_search_calls, tool_pricing)
         cost = token_cost + web_search_cost
         print(
-            f"Estimated cost_usd={cost:.6f} (tokens={token_cost:.6f}, web_search_calls={web_search_calls}, web_search_tool_cost={web_search_cost:.6f}, input={usage.input_tokens}, cached={usage.input_tokens_details.cached_tokens}, output={usage.output_tokens})",
+            f"Estimated cost_usd={cost:.6f} (service_tier={args.service_tier}, tokens={token_cost:.6f}, web_search_calls={web_search_calls}, web_search_tool_cost={web_search_cost:.6f}, input={usage.input_tokens}, cached={usage.input_tokens_details.cached_tokens}, output={usage.output_tokens})",
             file=sys.stderr,
         )
     print(json.dumps(result, indent=2, ensure_ascii=False))

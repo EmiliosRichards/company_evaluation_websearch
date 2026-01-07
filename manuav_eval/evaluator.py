@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict
+import random
 
 from openai import OpenAI
 from openai.types.responses.response_usage import ResponseUsage
@@ -75,6 +77,10 @@ def evaluate_company(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> Dict[str, Any]:
     result, _usage, _web_search_calls = _evaluate_company_raw(
         url,
@@ -84,6 +90,10 @@ def evaluate_company(
         reasoning_effort=reasoning_effort,
         prompt_cache=prompt_cache,
         prompt_cache_retention=prompt_cache_retention,
+        service_tier=service_tier,
+        timeout_seconds=timeout_seconds,
+        flex_max_retries=flex_max_retries,
+        flex_fallback_to_auto=flex_fallback_to_auto,
     )
     return result
 
@@ -97,6 +107,10 @@ def evaluate_company_with_usage(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage]:
     result, usage, _web_search_calls = _evaluate_company_raw(
         url,
@@ -106,6 +120,10 @@ def evaluate_company_with_usage(
         reasoning_effort=reasoning_effort,
         prompt_cache=prompt_cache,
         prompt_cache_retention=prompt_cache_retention,
+        service_tier=service_tier,
+        timeout_seconds=timeout_seconds,
+        flex_max_retries=flex_max_retries,
+        flex_fallback_to_auto=flex_fallback_to_auto,
     )
     if usage is None:
         raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
@@ -121,6 +139,10 @@ def evaluate_company_with_usage_and_web_search_calls(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage, int]:
     result, usage, ws_stats = _evaluate_company_raw(
         url,
@@ -130,6 +152,10 @@ def evaluate_company_with_usage_and_web_search_calls(
         reasoning_effort=reasoning_effort,
         prompt_cache=prompt_cache,
         prompt_cache_retention=prompt_cache_retention,
+        service_tier=service_tier,
+        timeout_seconds=timeout_seconds,
+        flex_max_retries=flex_max_retries,
+        flex_fallback_to_auto=flex_fallback_to_auto,
     )
     if usage is None:
         raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
@@ -215,6 +241,10 @@ def evaluate_company_with_usage_and_web_search_debug(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage, Dict[str, Any]]:
     """Returns model JSON + usage + debug info about web_search_call items."""
     result, usage, ws_stats = _evaluate_company_raw(
@@ -225,6 +255,10 @@ def evaluate_company_with_usage_and_web_search_debug(
         reasoning_effort=reasoning_effort,
         prompt_cache=prompt_cache,
         prompt_cache_retention=prompt_cache_retention,
+        service_tier=service_tier,
+        timeout_seconds=timeout_seconds,
+        flex_max_retries=flex_max_retries,
+        flex_fallback_to_auto=flex_fallback_to_auto,
     )
     if usage is None:
         raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
@@ -240,6 +274,10 @@ def evaluate_company_with_usage_and_web_search_artifacts(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage, int, list[dict[str, str]]]:
     """
     Returns:
@@ -256,12 +294,35 @@ def evaluate_company_with_usage_and_web_search_artifacts(
         reasoning_effort=reasoning_effort,
         prompt_cache=prompt_cache,
         prompt_cache_retention=prompt_cache_retention,
+        service_tier=service_tier,
+        timeout_seconds=timeout_seconds,
+        flex_max_retries=flex_max_retries,
+        flex_fallback_to_auto=flex_fallback_to_auto,
     )
     if usage is None:
         raise RuntimeError("OpenAI response did not include usage; cannot compute cost.")
     web_search_calls = int(ws_stats.get("completed", 0))
     citations = ws_stats.get("url_citations") or []
     return result, usage, web_search_calls, citations
+
+
+def _normalize_service_tier(service_tier: str | None) -> str | None:
+    st = (service_tier or "").strip().lower()
+    if not st or st == "auto":
+        return None
+    return st
+
+
+def _is_resource_unavailable_429(exc: Exception) -> bool:
+    # Flex may return 429 "Resource Unavailable" (not charged).
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        resp = getattr(exc, "response", None)
+        status = getattr(resp, "status_code", None)
+    if status != 429:
+        return False
+    msg = str(exc).lower()
+    return "resource unavailable" in msg
 
 
 def _evaluate_company_raw(
@@ -273,6 +334,10 @@ def _evaluate_company_raw(
     reasoning_effort: str | None = None,
     prompt_cache: bool | None = None,
     prompt_cache_retention: str | None = None,
+    service_tier: str | None = None,
+    timeout_seconds: float | None = None,
+    flex_max_retries: int | None = None,
+    flex_fallback_to_auto: bool | None = None,
 ) -> tuple[Dict[str, Any], ResponseUsage | None, Dict[str, Any]]:
     client = OpenAI()
     rubric_path, rubric_text = load_rubric_text(rubric_file)
@@ -314,6 +379,9 @@ Company website URL: {normalized_url}
         "tools": [{"type": "web_search_preview"}],
         "text": json_schema_text_config(),
     }
+    st = _normalize_service_tier(service_tier)
+    if st is not None:
+        create_kwargs["service_tier"] = st
     if max_tool_calls is not None:
         create_kwargs["max_tool_calls"] = max_tool_calls
     if reasoning_effort:
@@ -325,7 +393,35 @@ Company website URL: {normalized_url}
         if prompt_cache_retention:
             create_kwargs["prompt_cache_retention"] = prompt_cache_retention
 
-    resp = client.responses.create(**create_kwargs)
+    # Flex processing may be slower; allow a larger timeout and retries on 429 Resource Unavailable.
+    call_client = client
+    if timeout_seconds is not None and hasattr(client, "with_options"):
+        call_client = client.with_options(timeout=float(timeout_seconds))
+
+    max_retries = int(flex_max_retries) if flex_max_retries is not None else 0
+    fallback = bool(flex_fallback_to_auto) if flex_fallback_to_auto is not None else False
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = call_client.responses.create(**create_kwargs)
+            break
+        except Exception as e:  # pragma: no cover (SDK exception types vary)
+            if st != "flex" or not _is_resource_unavailable_429(e):
+                raise
+
+            # If Flex is unavailable and we've exhausted retries, optionally fall back to standard processing.
+            if attempt >= max_retries:
+                if fallback:
+                    create_kwargs.pop("service_tier", None)
+                    resp = call_client.responses.create(**create_kwargs)
+                    break
+                raise
+
+            # Exponential backoff with jitter.
+            base = 1.0
+            delay = min(60.0, base * (2**attempt))
+            delay = delay * (0.8 + 0.4 * random.random())
+            time.sleep(delay)
 
     text = _extract_json_text(resp)
     result = json.loads(text)
