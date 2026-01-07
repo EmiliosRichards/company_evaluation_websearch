@@ -5,7 +5,11 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
-outputs/*.jsonl
-outputs/*.json
-outputs/*.csv
+outputs/
+coverage.xml
+.coverage
+htmlcov/
 data/*.csv
+data/*.txt
+data/*.list
+data/*.urls
