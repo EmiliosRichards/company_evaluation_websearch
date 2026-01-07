@@ -45,6 +45,7 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         timeout_seconds=None,
         flex_max_retries=None,
         flex_fallback_to_auto=None,
+        second_query_on_uncertainty=None,
     ):
         score = 2.0 if "a.com" in url else 8.0
         return (
@@ -79,6 +80,9 @@ def test_run_irene_sample_main_writes_jsonl(tmp_path: Path, monkeypatch) -> None
         timeout_seconds=None,
         flex_max_retries=None,
         flex_fallback_to_auto=None,
+        include_sources=False,
+        extra_user_instructions=None,
+        second_query_on_uncertainty=None,
     ):
         score = 2.0 if "a.com" in url else 8.0
         return (

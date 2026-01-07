@@ -24,6 +24,32 @@ OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 
+OUTPUT_SCHEMA_WITH_SOURCES: Dict[str, Any] = {
+    **OUTPUT_SCHEMA,
+    "properties": {
+        **(OUTPUT_SCHEMA.get("properties") or {}),
+        # Debug-only: allow a compact sources list for auditing/search-behavior analysis.
+        "sources": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "url": {"type": "string"},
+                    "title": {"type": "string"},
+                    "note": {"type": "string", "maxLength": 160},
+                },
+                # OpenAI strict JSON Schema requires that `required` includes every key in `properties`.
+                # Allow empty strings for title/note if unknown.
+                "required": ["url", "title", "note"],
+            },
+        },
+    },
+    "required": [*OUTPUT_SCHEMA.get("required", []), "sources"],
+}
+
+
 def json_schema_text_config(
     *,
     name: str = "manuav_company_fit",

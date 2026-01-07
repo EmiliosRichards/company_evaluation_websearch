@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -94,9 +95,48 @@ def _load_url_list(path: Path) -> List[Dict[str, str]]:
 
 
 def _load_csv_rows(path: Path) -> List[Dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
+    # Materialize all rows (OK for smaller files).
+    return list(_iter_csv_rows(path, csv_delimiter=None))
+
+
+def _detect_csv_delimiter(sample: str) -> str:
+    # Prefer using the header line only (data lines may contain lots of commas inside fields).
+    header = ""
+    for line in (sample or "").splitlines():
+        if line.strip():
+            header = line
+            break
+
+    # Heuristic: pick the delimiter with the highest count in the header.
+    if header:
+        counts = {d: header.count(d) for d in [",", ";", "\t", "|"]}
+        best = max(counts.items(), key=lambda kv: kv[1])[0]
+        if counts[best] > 0:
+            return best
+
+    # Best-effort: try Sniffer as a fallback.
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
+        if getattr(dialect, "delimiter", None):
+            return dialect.delimiter
+    except Exception:
+        pass
+
+    return ","
+
+
+def _iter_csv_rows(path: Path, csv_delimiter: str | None) -> Iterable[Dict[str, str]]:
+    # Use utf-8-sig to handle BOM-prefixed CSV headers.
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        # Auto-detect delimiter unless explicitly provided.
+        delim = (csv_delimiter or "").strip()
+        if not delim:
+            head = f.read(4096)
+            f.seek(0)
+            delim = _detect_csv_delimiter(head)
+        reader = csv.DictReader(f, delimiter=delim)
+        for r in reader:
+            yield r
 
 
 def _load_rows(
@@ -114,6 +154,24 @@ def _load_rows(
     if fmt == "txt":
         return _load_url_list(input_path)
     return _load_csv_rows(input_path)
+
+
+def _iter_rows(
+    input_path: Path,
+    *,
+    input_format: str | None,
+    csv_delimiter: str | None,
+) -> Iterable[Dict[str, str]]:
+    fmt = (input_format or "auto").strip().lower()
+    if fmt not in {"auto", "csv", "txt"}:
+        raise SystemExit(f"Unsupported --input-format {input_format!r}. Use: auto/csv/txt.")
+
+    if fmt == "auto":
+        fmt = "txt" if _is_probably_url_list_file(input_path) else "csv"
+
+    if fmt == "txt":
+        return _load_url_list(input_path)
+    return _iter_csv_rows(input_path, csv_delimiter=csv_delimiter)
 
 
 def _iter_processed_websites_from_jsonl(jsonl_path: Path) -> Iterable[str]:
@@ -169,6 +227,11 @@ def main() -> int:
         help="Input format: auto (default), csv, txt. Env: MANUAV_INPUT_FORMAT",
     )
     parser.add_argument(
+        "--csv-delimiter",
+        default=os.environ.get("MANUAV_CSV_DELIMITER") or None,
+        help="CSV delimiter override (e.g. ';'). Default: auto-detect. Env: MANUAV_CSV_DELIMITER",
+    )
+    parser.add_argument(
         "--url-column",
         default=os.environ.get("MANUAV_URL_COLUMN", "Website"),
         help="CSV column name that contains the URL. Ignored for TXT. Default: Website. Env: MANUAV_URL_COLUMN",
@@ -181,12 +244,24 @@ def main() -> int:
     parser.add_argument(
         "--score-column",
         default=os.environ.get("MANUAV_SCORE_COLUMN", "Manuav-Score"),
-        help="CSV column name with reference score (for MAE). Set to empty to disable. Default: Manuav-Score. Env: MANUAV_SCORE_COLUMN",
+        help="CSV column name with reference score (for MAE). Use '-' (or set env empty) to disable. Default: Manuav-Score. Env: MANUAV_SCORE_COLUMN",
     )
     parser.add_argument(
         "--bucket-column",
         default=os.environ.get("MANUAV_BUCKET_COLUMN", "bucket"),
-        help="Optional CSV column for bucket labels (low/mid/high). Default: bucket. Env: MANUAV_BUCKET_COLUMN",
+        help="Optional CSV column for bucket labels (low/mid/high). Use '-' to disable. Default: bucket. Env: MANUAV_BUCKET_COLUMN",
+    )
+    parser.add_argument(
+        "--random-sample",
+        type=int,
+        default=int(os.environ["MANUAV_RANDOM_SAMPLE"]) if os.environ.get("MANUAV_RANDOM_SAMPLE") else None,
+        help="Randomly sample N unique rows (URL present) from the input before evaluating. Env: MANUAV_RANDOM_SAMPLE",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=int(os.environ.get("MANUAV_SAMPLE_SEED", "42")),
+        help="RNG seed for --random-sample (default 42). Env: MANUAV_SAMPLE_SEED",
     )
     parser.add_argument(
         "--dedupe",
@@ -228,7 +303,10 @@ def main() -> int:
         "--max-tool-calls",
         type=int,
         default=int(os.environ["MANUAV_MAX_TOOL_CALLS"]) if os.environ.get("MANUAV_MAX_TOOL_CALLS") else None,
-        help="Optional cap on tool calls (web searches) within each single LLM call. Env: MANUAV_MAX_TOOL_CALLS",
+        help=(
+            "Optional cap on tool calls (web searches) within each single LLM call. "
+            "This is a cost guardrail; the model may use fewer. Env: MANUAV_MAX_TOOL_CALLS"
+        ),
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -276,6 +354,43 @@ def main() -> int:
         default=(os.environ.get("MANUAV_DEBUG_WEB_SEARCH", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
         help="Include OpenAI web_search_call debug info in JSONL records. Env: MANUAV_DEBUG_WEB_SEARCH=1",
     )
+    parser.add_argument(
+        "--second-query-on-uncertainty",
+        action="store_true",
+        default=(os.environ.get("MANUAV_SECOND_QUERY_ON_UNCERTAINTY", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
+        help="Allow a second web-search query only for ambiguous/low-confidence cases (does not force it). Env: MANUAV_SECOND_QUERY_ON_UNCERTAINTY=1",
+    )
+    parser.add_argument(
+        "--retry-disambiguation-on-low-confidence",
+        action="store_true",
+        default=(
+            os.environ.get("MANUAV_RETRY_DISAMBIGUATION_ON_LOW_CONFIDENCE", "").strip()
+            in ("1", "true", "TRUE", "yes", "YES")
+        ),
+        help=(
+            "If the model returns confidence=low, re-run the evaluation once with stronger disambiguation instructions. "
+            "This is a second model call (extra tokens + extra web-search queries if used). "
+            "Env: MANUAV_RETRY_DISAMBIGUATION_ON_LOW_CONFIDENCE=1"
+        ),
+    )
+    parser.add_argument(
+        "--retry-max-tool-calls",
+        type=int,
+        default=int(os.environ.get("MANUAV_RETRY_MAX_TOOL_CALLS", "3") or 3),
+        help="max_tool_calls to use for the retry call (if retry is triggered). Default: 3. Env: MANUAV_RETRY_MAX_TOOL_CALLS",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        default=(os.environ.get("MANUAV_CONTINUE_ON_ERROR", "").strip() in ("1", "true", "TRUE", "yes", "YES")),
+        help="Continue the run if an evaluation errors; write an error record instead of aborting. Env: MANUAV_CONTINUE_ON_ERROR=1",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=int(os.environ.get("MANUAV_PROGRESS_EVERY", "25")),
+        help="Print progress/ETA every N completed evaluations. Env: MANUAV_PROGRESS_EVERY (default 25)",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -297,7 +412,7 @@ def main() -> int:
     out_path = Path(args.out) if args.out else (out_dir / f"{stem}.jsonl")
     out_csv_path = Path(args.out_csv) if args.out_csv else (out_dir / f"{stem}.csv")
 
-    rows = _load_rows(input_path, input_format=args.input_format)
+    rows_iter = _iter_rows(input_path, input_format=args.input_format, csv_delimiter=args.csv_delimiter)
 
     results: List[Dict[str, Any]] = []
     pairs: List[Tuple[float, float]] = []
@@ -305,12 +420,22 @@ def main() -> int:
     pricing = pricing_from_env(os.environ)
     tool_pricing = web_search_pricing_from_env(os.environ)
 
+    # Flex discount: apply a multiplier to token-cost estimates only.
+    # Web search tool usage is billed separately (typically $0.01 per query) and is not discounted the same way.
+    flex_discount = float(os.environ.get("MANUAV_FLEX_TOKEN_DISCOUNT", "0.5") or 0.5)
+    apply_flex_discount = (args.service_tier or "").strip().lower() == "flex"
+
+    bucket_col_raw = (args.bucket_column or "").strip()
+    bucket_col = "" if bucket_col_raw.lower() in {"", "-", "none", "null"} else bucket_col_raw
+    include_bucket = bool(bucket_col)
+
+    score_col_raw = (args.score_column or "").strip()
+    score_col = "" if score_col_raw.lower() in {"", "-", "none", "null"} else score_col_raw
+    include_score = bool(score_col)
     csv_fieldnames = [
         "run_id",
-        "bucket",
         "firma",
         "website",
-        "irene_score",
         "model_score",
         "company_name",
         "input_url",
@@ -328,42 +453,113 @@ def main() -> int:
         "cost_usd",
         "token_cost_usd",
         "web_search_calls",
+        "web_search_tool_calls_total",
         "web_search_tool_cost_usd",
+        "web_search_calls_query",
+        "web_search_calls_open",
+        "web_search_calls_unknown",
         "price_input_per_1m",
         "price_cached_input_per_1m",
         "price_output_per_1m",
         "price_web_search_per_1k",
+        "duration_seconds",
+        "flex_attempts",
+        "flex_retries",
+        "flex_sleep_seconds_total",
+        "flex_fallback_used",
+        "retry_used",
+        "retry_selected",
+        "error",
     ]
+    if include_score:
+        # Keep the legacy column name for compatibility when a reference score is provided.
+        csv_fieldnames.insert(4, "irene_score")
+    if include_bucket:
+        csv_fieldnames.insert(1, "bucket")
 
     processed = set()
     if args.resume:
         processed = {_normalize_for_dedupe(u) for u in _iter_processed_websites_from_jsonl(out_path)}
         processed.discard("")
 
-    # Optional dedupe: keep the first occurrence.
+    # (score_col already normalized above)
+
+    # Build the evaluation set:
+    # - if --random-sample is set, reservoir-sample unique URLs while streaming the input
+    # - else, filter/dedupe/resume over all rows
     filtered_rows: List[Dict[str, str]] = []
     seen = set()
-    for r in rows:
-        website = (r.get(args.url_column) or r.get("Website") or "").strip()
-        if not website:
-            continue
-        key = _normalize_for_dedupe(website) if args.dedupe or args.resume else website
-        if not key:
-            continue
-        if args.resume and key in processed:
-            continue
-        if args.dedupe:
-            if key in seen:
+
+    def _row_website(r: Dict[str, str]) -> str:
+        return (r.get(args.url_column) or r.get("Website") or "").strip()
+
+    if args.random_sample is not None:
+        k = max(0, int(args.random_sample))
+        rng = random.Random(int(args.seed))
+        reservoir: List[Dict[str, str]] = []
+        unique_seen: set[str] = set()
+        n_unique = 0
+        for r in rows_iter:
+            website = _row_website(r)
+            if not website:
                 continue
-            seen.add(key)
-        filtered_rows.append(r)
+            key = _normalize_for_dedupe(website)
+            if not key:
+                continue
+            if args.resume and key in processed:
+                continue
+            if key in unique_seen:
+                continue
+            unique_seen.add(key)
+            n_unique += 1
+            if len(reservoir) < k:
+                reservoir.append(r)
+            else:
+                j = rng.randrange(n_unique)
+                if j < k:
+                    reservoir[j] = r
+        filtered_rows = reservoir
+    else:
+        # Optional dedupe: keep the first occurrence.
+        for r in rows_iter:
+            website = (r.get(args.url_column) or r.get("Website") or "").strip()
+            if not website:
+                continue
+            key = _normalize_for_dedupe(website) if args.dedupe or args.resume else website
+            if not key:
+                continue
+            if args.resume and key in processed:
+                continue
+            if args.dedupe:
+                if key in seen:
+                    continue
+                seen.add(key)
+            filtered_rows.append(r)
 
     if args.limit is not None:
         filtered_rows = filtered_rows[: max(0, args.limit)]
 
+    # If we used random sampling, write out the sampled URLs for reproducibility.
+    if args.random_sample is not None:
+        sample_path = out_dir / f"{stem}_sample_urls.txt"
+        with sample_path.open("w", encoding="utf-8") as sf:
+            for r in filtered_rows:
+                website = _row_website(r)
+                name = (r.get(args.name_column) or r.get("Firma") or "").strip()
+                if name:
+                    sf.write(f"{website}\t{name}\n")
+                else:
+                    sf.write(f"{website}\n")
+        print(f"Wrote sampled URL list: {sample_path}", flush=True)
+
     # If resuming and output files already exist, append; else create new.
     out_mode = "a" if (args.resume and out_path.exists()) else "w"
     csv_mode = "a" if (args.resume and out_csv_path.exists()) else "w"
+
+    run_started_at = time.monotonic()
+    started_wall = datetime.now()
+    completed_ok = 0
+    completed_err = 0
 
     with out_path.open(out_mode, encoding="utf-8") as out, out_csv_path.open(csv_mode, encoding="utf-8", newline="") as out_csv:
         writer = csv.DictWriter(out_csv, fieldnames=csv_fieldnames, extrasaction="ignore")
@@ -373,76 +569,259 @@ def main() -> int:
         for i, r in enumerate(filtered_rows, start=1):
             website = (r.get(args.url_column) or r.get("Website") or "").strip()
             name = (r.get(args.name_column) or r.get("Firma") or "").strip()
-            score_col = (args.score_column or "").strip()
-            irene_score = _to_float(r.get(score_col, "")) if score_col else None
+            irene_score = _to_float(r.get(score_col, "")) if include_score else None
             if not website:
                 continue
 
-            print(f"[{i}/{len(filtered_rows)}] Evaluating: {name} | {website}")
-            if args.debug_web_search:
-                model_result, usage, ws_debug = evaluate_company_with_usage_and_web_search_debug(
-                    website,
-                    args.model,
-                    rubric_file=args.rubric_file,
+            print(f"[{i}/{len(filtered_rows)}] Evaluating: {name} | {website}", flush=True)
+            t0 = time.monotonic()
+            ws_debug: Dict[str, Any] | None = None
+            error: str | None = None
+            retry_used = False
+            retry_selected = "first"
+            # Totals may include multiple attempts if retry is enabled.
+            usage_input_tokens = 0
+            usage_output_tokens = 0
+            usage_total_tokens = 0
+            cached_tokens = 0
+            reasoning_tokens = 0
+            token_cost_usd_raw = 0.0
+            token_cost_usd = 0.0
+            flex_attempts = 0
+            flex_retries = 0
+            flex_sleep = 0.0
+            flex_fallback_used = False
+
+            try:
+                def _do_eval_once(
+                    *,
+                    max_tool_calls: int | None,
+                    extra_user_instructions: str | None,
+                    second_query_on_uncertainty: bool,
+                ) -> Dict[str, Any]:
+                    use_debug = bool(args.debug_web_search) or bool(extra_user_instructions and extra_user_instructions.strip())
+                    if use_debug:
+                        res, use, ws = evaluate_company_with_usage_and_web_search_debug(
+                            website,
+                            args.model,
+                            rubric_file=args.rubric_file,
+                            max_tool_calls=max_tool_calls,
+                            reasoning_effort=args.reasoning_effort,
+                            prompt_cache=args.prompt_cache,
+                            prompt_cache_retention=args.prompt_cache_retention,
+                            service_tier=args.service_tier,
+                            timeout_seconds=timeout_seconds,
+                            flex_max_retries=args.flex_max_retries,
+                            flex_fallback_to_auto=args.flex_fallback_to_auto,
+                            include_sources=False,
+                            extra_user_instructions=extra_user_instructions,
+                            second_query_on_uncertainty=second_query_on_uncertainty,
+                        )
+                        citations = (ws or {}).get("url_citations") or []
+                        by_kind_completed = (ws or {}).get("by_kind_completed") or {}
+                        q = int(by_kind_completed.get("query", 0) or 0)
+                        o = int(by_kind_completed.get("open", 0) or 0)
+                        u = int(by_kind_completed.get("unknown", 0) or 0)
+                        billed_q = int(q)
+                        tool_total = int((ws or {}).get("completed", 0) or 0)
+                        flex_meta_local = (ws or {}).get("flex") if isinstance(ws, dict) else {}
+                        return {
+                            "model_result": res,
+                            "usage": use,
+                            "ws_debug": ws,
+                            "url_citations": citations,
+                            "web_search_calls": billed_q,
+                            "web_search_calls_query": q,
+                            "web_search_calls_open": o,
+                            "web_search_calls_unknown": u,
+                            "web_search_tool_calls_total": tool_total,
+                            "flex_meta": flex_meta_local or {},
+                        }
+
+                    res, use, billed_q, citations = evaluate_company_with_usage_and_web_search_artifacts(
+                        website,
+                        args.model,
+                        rubric_file=args.rubric_file,
+                        max_tool_calls=max_tool_calls,
+                        reasoning_effort=args.reasoning_effort,
+                        prompt_cache=args.prompt_cache,
+                        prompt_cache_retention=args.prompt_cache_retention,
+                        service_tier=args.service_tier,
+                        timeout_seconds=timeout_seconds,
+                        flex_max_retries=args.flex_max_retries,
+                        flex_fallback_to_auto=args.flex_fallback_to_auto,
+                        second_query_on_uncertainty=second_query_on_uncertainty,
+                    )
+                    return {
+                        "model_result": res,
+                        "usage": use,
+                        "ws_debug": None,
+                        "url_citations": citations,
+                        "web_search_calls": int(billed_q),
+                        "web_search_calls_query": 0,
+                        "web_search_calls_open": 0,
+                        "web_search_calls_unknown": 0,
+                        "web_search_tool_calls_total": int(billed_q),
+                        "flex_meta": {},
+                    }
+
+                a1 = _do_eval_once(
                     max_tool_calls=args.max_tool_calls,
-                    reasoning_effort=args.reasoning_effort,
-                    prompt_cache=args.prompt_cache,
-                    prompt_cache_retention=args.prompt_cache_retention,
-                    service_tier=args.service_tier,
-                    timeout_seconds=timeout_seconds,
-                    flex_max_retries=args.flex_max_retries,
-                    flex_fallback_to_auto=args.flex_fallback_to_auto,
+                    extra_user_instructions=None,
+                    second_query_on_uncertainty=bool(args.second_query_on_uncertainty),
                 )
-                web_search_calls = int(ws_debug.get("completed", 0))
-                url_citations = ws_debug.get("url_citations") or []
-            else:
-                model_result, usage, web_search_calls, url_citations = evaluate_company_with_usage_and_web_search_artifacts(
-                    website,
-                    args.model,
-                    rubric_file=args.rubric_file,
-                    max_tool_calls=args.max_tool_calls,
-                    reasoning_effort=args.reasoning_effort,
-                    prompt_cache=args.prompt_cache,
-                    prompt_cache_retention=args.prompt_cache_retention,
-                    service_tier=args.service_tier,
-                    timeout_seconds=timeout_seconds,
-                    flex_max_retries=args.flex_max_retries,
-                    flex_fallback_to_auto=args.flex_fallback_to_auto,
+                attempts: list[Dict[str, Any]] = [a1]
+
+                selected = a1
+                conf1 = str((a1.get("model_result") or {}).get("confidence") or "").strip().lower()
+                if args.retry_disambiguation_on_low_confidence and conf1 == "low":
+                    retry_used = True
+                    retry_max = int(args.retry_max_tool_calls)
+                    if args.max_tool_calls is not None:
+                        retry_max = max(int(args.max_tool_calls), retry_max)
+                    disambig_prompt = (
+                        "Perform TWO distinct web searches before scoring.\n"
+                        "1) Search using the provided domain/company name (e.g., '<domain>').\n"
+                        "2) Search again with a disambiguation query that adds legal-entity/location hints, e.g. "
+                        "'<name> GmbH impressum', '<name> Munich impressum', '<name> HRB'.\n"
+                        "If results are ambiguous/conflicting, prefer sources that match the provided domain and DACH legal/imprint details; "
+                        "otherwise explicitly note uncertainty.\n"
+                    )
+                    a2 = _do_eval_once(
+                        max_tool_calls=retry_max,
+                        extra_user_instructions=disambig_prompt,
+                        second_query_on_uncertainty=False,
+                    )
+                    attempts.append(a2)
+                    conf2 = str((a2.get("model_result") or {}).get("confidence") or "").strip().lower()
+                    if conf2 and conf2 != "low":
+                        selected = a2
+                        retry_selected = "retry"
+
+                model_result = selected["model_result"]
+                usage = selected["usage"]
+                url_citations = selected["url_citations"]
+                ws_debug = selected["ws_debug"] if args.debug_web_search else None
+
+                # Aggregate tool usage across attempts (billing happens for both calls).
+                web_search_calls = sum(int(a.get("web_search_calls", 0) or 0) for a in attempts)
+                web_search_calls_query = sum(int(a.get("web_search_calls_query", 0) or 0) for a in attempts)
+                web_search_calls_open = sum(int(a.get("web_search_calls_open", 0) or 0) for a in attempts)
+                web_search_calls_unknown = sum(int(a.get("web_search_calls_unknown", 0) or 0) for a in attempts)
+                web_search_tool_calls_total = sum(int(a.get("web_search_tool_calls_total", 0) or 0) for a in attempts)
+
+                # Aggregate usage + token cost across attempts.
+                usage_input_tokens = sum(int(a["usage"].input_tokens) for a in attempts)
+                usage_output_tokens = sum(int(a["usage"].output_tokens) for a in attempts)
+                usage_total_tokens = sum(int(a["usage"].total_tokens) for a in attempts)
+                cached_tokens = sum(
+                    int(getattr(getattr(a["usage"], "input_tokens_details", None), "cached_tokens", 0) or 0) for a in attempts
                 )
+                reasoning_tokens = sum(
+                    int(getattr(getattr(a["usage"], "output_tokens_details", None), "reasoning_tokens", 0) or 0) for a in attempts
+                )
+                token_cost_usd_raw = sum(compute_cost_usd(a["usage"], pricing) for a in attempts)
+                token_cost_usd = (token_cost_usd_raw * flex_discount) if apply_flex_discount else token_cost_usd_raw
+
+                # Flex stats (if available) are best-effort aggregates (debug path only).
+                flex_attempts = sum(int((a.get("flex_meta") or {}).get("attempts", 0) or 0) for a in attempts)
+                flex_retries = sum(int((a.get("flex_meta") or {}).get("retries", 0) or 0) for a in attempts)
+                flex_sleep = sum(float((a.get("flex_meta") or {}).get("sleep_seconds_total", 0.0) or 0.0) for a in attempts)
+                flex_fallback_used = any(bool((a.get("flex_meta") or {}).get("fallback_used", False)) for a in attempts)
+            except Exception as e:
+                if not args.continue_on_error:
+                    raise
+                error = f"{type(e).__name__}: {e}"
+                model_result = {
+                    "input_url": website if website.startswith("http") else f"https://{website}",
+                    "company_name": "",
+                    "manuav_fit_score": 0.0,
+                    "confidence": "low",
+                    "reasoning": "",
+                }
+                usage = type(
+                    "_Usage",
+                    (),
+                    {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "input_tokens_details": type("X", (), {"cached_tokens": 0})(),
+                        "output_tokens_details": type("Y", (), {"reasoning_tokens": 0})(),
+                    },
+                )()
+                web_search_calls = 0
+                url_citations = []
+                ws_debug = {"flex": {"attempts": 0, "retries": 0, "sleep_seconds_total": 0.0, "fallback_used": False}}
+                web_search_calls_query = 0
+                web_search_calls_open = 0
+                web_search_calls_unknown = 0
+                web_search_tool_calls_total = 0
+
+            duration_seconds = time.monotonic() - t0
+
             model_score = float(model_result.get("manuav_fit_score", 0.0))
-            token_cost_usd = compute_cost_usd(usage, pricing)
             web_search_tool_cost_usd = compute_web_search_tool_cost_usd(web_search_calls, tool_pricing)
             cost_usd = token_cost_usd + web_search_tool_cost_usd
 
-            cached_tokens = int(getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0)
-            reasoning_tokens = int(getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0)
-
             record = {
-                "bucket": (r.get(args.bucket_column) or r.get("bucket") or "").strip(),
                 "firma": name,
                 "website": website,
-                "irene_score": irene_score,
                 "model_score": model_score,
                 "model_confidence": model_result.get("confidence"),
                 "reasoning": model_result.get("reasoning"),
                 "url_citations": url_citations,
+                "duration_seconds": duration_seconds,
+                "flex": {
+                    "attempts": flex_attempts,
+                    "retries": flex_retries,
+                    "sleep_seconds_total": flex_sleep,
+                    "fallback_used": flex_fallback_used,
+                },
+                "error": error,
                 "usage": {
-                    "input_tokens": usage.input_tokens,
+                    "input_tokens": usage_input_tokens,
                     "cached_input_tokens": cached_tokens,
-                    "output_tokens": usage.output_tokens,
+                    "output_tokens": usage_output_tokens,
                     "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": usage.total_tokens,
+                    "total_tokens": usage_total_tokens,
                 },
                 "cost_usd": round(cost_usd, 6),
                 "token_cost_usd": round(token_cost_usd, 6),
                 "web_search_calls": int(web_search_calls),
+                "web_search_tool_calls_total": int(web_search_tool_calls_total),
                 "web_search_tool_cost_usd": round(web_search_tool_cost_usd, 6),
+                "web_search_calls_query": int(web_search_calls_query),
+                "web_search_calls_open": int(web_search_calls_open),
+                "web_search_calls_unknown": int(web_search_calls_unknown),
                 "web_search_debug": ws_debug if args.debug_web_search else None,
+                "retry": {"used": bool(retry_used), "selected": retry_selected},
                 "raw": model_result,
             }
+            if include_bucket:
+                record["bucket"] = (r.get(bucket_col) or r.get("bucket") or "").strip()
+            if include_score:
+                record["irene_score"] = irene_score
             results.append(record)
             if irene_score is not None:
                 pairs.append((irene_score, model_score))
+
+            if error:
+                completed_err += 1
+            else:
+                completed_ok += 1
+
+            if args.progress_every and ((completed_ok + completed_err) % max(1, args.progress_every) == 0):
+                elapsed = time.monotonic() - run_started_at
+                done = completed_ok + completed_err
+                rate = done / elapsed if elapsed > 0 else 0.0
+                remaining = max(0, len(filtered_rows) - done)
+                eta = (remaining / rate) if rate > 0 else float("inf")
+                print(
+                    f"Progress: {done}/{len(filtered_rows)} (ok={completed_ok}, err={completed_err}) "
+                    f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m",
+                    flush=True,
+                )
 
             # JSONL (full raw)
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -450,47 +829,63 @@ def main() -> int:
 
             # CSV (flattened)
             sources = url_citations or []
-            writer.writerow(
-                {
-                    "run_id": stem,
-                    "bucket": record["bucket"],
-                    "firma": record["firma"],
-                    "website": record["website"],
-                    "irene_score": record["irene_score"] if record["irene_score"] is not None else "",
-                    "model_score": record["model_score"],
-                    "company_name": model_result.get("company_name"),
-                    "input_url": model_result.get("input_url"),
-                    "confidence": model_result.get("confidence"),
-                    "reasoning": model_result.get("reasoning"),
-                    "url_citations_json": json.dumps(sources, ensure_ascii=False),
-                    "rubric_file": args.rubric_file,
-                    "model": args.model,
-                    "service_tier": args.service_tier,
-                    "input_tokens": usage.input_tokens,
-                    "cached_input_tokens": cached_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "total_tokens": usage.total_tokens,
-                    "cost_usd": round(cost_usd, 6),
-                    "token_cost_usd": round(token_cost_usd, 6),
-                    "web_search_calls": int(web_search_calls),
-                    "web_search_tool_cost_usd": round(web_search_tool_cost_usd, 6),
-                    "price_input_per_1m": pricing.input_usd,
-                    "price_cached_input_per_1m": pricing.cached_input_usd,
-                    "price_output_per_1m": pricing.output_usd,
-                    "price_web_search_per_1k": tool_pricing.per_1k_calls_usd,
-                }
-            )
+            row_out: Dict[str, Any] = {
+                "run_id": stem,
+                "firma": record["firma"],
+                "website": record["website"],
+                "model_score": record["model_score"],
+                "company_name": model_result.get("company_name"),
+                "input_url": model_result.get("input_url"),
+                "confidence": model_result.get("confidence"),
+                "reasoning": model_result.get("reasoning"),
+                "url_citations_json": json.dumps(sources, ensure_ascii=False),
+                "rubric_file": args.rubric_file,
+                "model": args.model,
+                "service_tier": args.service_tier,
+                "input_tokens": usage_input_tokens,
+                "cached_input_tokens": cached_tokens,
+                "output_tokens": usage_output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "total_tokens": usage_total_tokens,
+                "cost_usd": round(cost_usd, 6),
+                "token_cost_usd": round(token_cost_usd, 6),
+                "web_search_calls": int(web_search_calls),
+                "web_search_tool_calls_total": int(web_search_tool_calls_total),
+                "web_search_tool_cost_usd": round(web_search_tool_cost_usd, 6),
+                "web_search_calls_query": int(web_search_calls_query),
+                "web_search_calls_open": int(web_search_calls_open),
+                "web_search_calls_unknown": int(web_search_calls_unknown),
+                "price_input_per_1m": pricing.input_usd,
+                "price_cached_input_per_1m": pricing.cached_input_usd,
+                "price_output_per_1m": pricing.output_usd,
+                "price_web_search_per_1k": tool_pricing.per_1k_calls_usd,
+                "duration_seconds": round(duration_seconds, 3),
+                "flex_attempts": flex_attempts,
+                "flex_retries": flex_retries,
+                "flex_sleep_seconds_total": round(flex_sleep, 3),
+                "flex_fallback_used": int(flex_fallback_used),
+                "retry_used": int(bool(retry_used)),
+                "retry_selected": retry_selected,
+                "error": error or "",
+            }
+            if include_bucket:
+                row_out["bucket"] = record.get("bucket", "")
+            if include_score:
+                row_out["irene_score"] = irene_score if irene_score is not None else ""
+            writer.writerow(row_out)
             out_csv.flush()
 
             time.sleep(max(0.0, args.sleep))
 
-    print(f"\nWrote results (jsonl): {out_path}")
-    print(f"Wrote results (csv):   {out_csv_path}")
+    print(f"\nWrote results (jsonl): {out_path}", flush=True)
+    print(f"Wrote results (csv):   {out_csv_path}", flush=True)
+    total_elapsed = time.monotonic() - run_started_at
+    print(f"Run time: {total_elapsed/60:.1f} minutes (started {started_wall.strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+    print(f"Completed: ok={completed_ok}, err={completed_err}, total={completed_ok + completed_err}", flush=True)
     if pairs:
-        print(f"Compared {len(pairs)} rows. MAE={_mae(pairs):.2f}")
+        print(f"Compared {len(pairs)} rows. MAE={_mae(pairs):.2f}", flush=True)
     else:
-        print("No reference score column values found; MAE not computed.")
+        print("No reference score column values found; MAE not computed.", flush=True)
     return 0
 
 

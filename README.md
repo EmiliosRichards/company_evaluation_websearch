@@ -9,6 +9,13 @@ Supported providers:
 - **OpenAI** (using `gpt-4.1-mini`, `gpt-4o`, `gpt-5.x`, etc.) with built-in Web Search tool.
 - **Google Gemini** (using `gemini-3-flash-preview`, `gemini-2.0-flash`, etc.) with Grounding with Google Search.
 
+### Usage guide (recommended)
+
+See `docs/USAGE.md` for:
+- a full list of **key CLI flags + env vars** per script
+- recommended presets (baseline vs sticky-company vs gated retry)
+- billing/cost tips (query vs open/visit)
+
 ### Setup
 
 - **Install**:
@@ -43,7 +50,28 @@ MANUAV_RUBRIC_FILE="rubrics/manuav_rubric_v4_en.md"
 Optional (cap web-search/tool calls per company - OpenAI only):
 
 ```bash
-MANUAV_MAX_TOOL_CALLS=8
+# Recommended guardrail: keep costs predictable by limiting tool use per company.
+# In our traces, the model often uses ~1 query per company even when the cap is higher.
+# Setting this to 2 allows rare “sticky” cases to use a second query without risking runaway spend.
+MANUAV_MAX_TOOL_CALLS=2
+```
+
+Optional (allow a second query only for “sticky” companies - OpenAI only):
+
+```bash
+# Default behavior: model typically uses ~1 query per company.
+# If enabled, the prompt allows ONE additional follow-up query when the first search is ambiguous
+# (entity disambiguation) or key rubric evidence is missing/contradictory.
+MANUAV_SECOND_QUERY_ON_UNCERTAINTY=1
+```
+
+Optional (gated retry on low confidence - OpenAI only):
+
+```bash
+# If the model returns confidence=low, run ONE retry with stronger disambiguation instructions.
+# This is a second model call (extra tokens + extra web-search queries if used), but it only triggers on low-confidence rows.
+MANUAV_RETRY_DISAMBIGUATION_ON_LOW_CONFIDENCE=1
+MANUAV_RETRY_MAX_TOOL_CALLS=3
 ```
 
 Optional (pricing for cost reporting; USD per 1M tokens - OpenAI only):
@@ -85,6 +113,9 @@ MANUAV_SERVICE_TIER=flex
 MANUAV_OPENAI_TIMEOUT_SECONDS=900
 MANUAV_FLEX_MAX_RETRIES=5
 MANUAV_FLEX_FALLBACK_TO_AUTO=1
+# Optional: apply Flex discount multiplier to token-cost estimates in our scripts (default 0.5).
+# Note: web search tool calls are billed separately (typically $0.01 per query) and are not discounted the same way.
+MANUAV_FLEX_TOKEN_DISCOUNT=0.5
 ```
 
 ### Run (OpenAI)
@@ -147,6 +178,24 @@ Scripts print strict JSON including:
 - `reasoning` (short: why this score, per rubric)
 
 Note: sources/URLs are not included in the JSON output to save output tokens. For OpenAI, you can extract citations from the Responses API output annotations when web search is enabled.
+
+#### How to interpret “Web Searches” and `web_search_calls`
+
+- **Billing/dashboard**: OpenAI’s “Web Searches” counter appears to reflect **query-type** searches billed at **$0.01 per query**.
+- **This repo’s outputs**:
+  - `web_search_calls`: **billed query searches** (what you should multiply by $0.01)
+  - `web_search_calls_query/open/unknown`: breakdown of completed tool calls by kind (available when `--debug-web-search` is enabled)
+  - `web_search_tool_calls_total`: total tool invocations (query + open/visit). Useful for diagnosing behavior but not necessarily billed the same way.
+
+#### Debug: trace what the model searched
+
+Use `scripts.trace_web_search` to understand how thorough the model is at your current tool budget (e.g. max 3):
+
+```bash
+python -m scripts.trace_web_search --input data/Manuav\\ Company\\ DE\\ 5-30\\ B2B.csv --url-column Website --name-column Company --sample 25 --max-tool-calls 3 --service-tier flex
+```
+
+For investigatory runs, you can add `--include-sources` to have the model output a compact `sources` list (increases output tokens; don’t use for bulk runs).
 
 ### Batch API (OpenAI, async, ~50% cheaper)
 
